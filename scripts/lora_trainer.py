@@ -25,7 +25,7 @@ import textwrap
 import threading
 import traceback
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import gradio as gr
 
@@ -239,7 +239,7 @@ def _http_download(url: str, dest: Path, timeout: int = 60) -> bool:
             data = resp.read()
         dest.write_bytes(data)
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 
@@ -1213,6 +1213,152 @@ def _job_log(s: str):
     logger.info("{} {}".format(TAG, s))
 
 
+# ── 🧬 Auto-LoRA — one picture in, one trained character out ────────────
+def _ext_module_pools():
+    """Extension scripts live in script_loading.loaded_scripts, NOT
+    sys.modules — search both."""
+    pools = []
+    try:
+        from modules import script_loading
+        pools.append(list(script_loading.loaded_scripts.values()))
+    except Exception:
+        pass
+    pools.append(list(sys.modules.values()))
+    return pools
+
+
+def _ext_module_with(attr: str):
+    for pool in _ext_module_pools():
+        for m in pool:
+            try:
+                if m is not None and hasattr(m, attr):
+                    return m
+            except Exception:
+                continue
+    return None
+
+
+_AUTO_JOB = {"q": None, "thread": None, "log": []}
+
+
+def auto_identify(img):
+    if img is None:
+        return "Upload a picture first.", "", ""
+    mod = _ext_module_with("analyze_image_wd14")
+    if mod is None:
+        return ("WD14 tagger not available — is the Prompt Enhancer "
+                "extension enabled?"), "", ""
+    try:
+        res = mod.analyze_image_wd14(img.convert("RGB"))
+        chars = res.get("characters") or []
+    except Exception as exc:
+        return "Tagger failed: {}".format(exc), "", ""
+    if not chars:
+        return ("😕 No known character detected — the tagger only knows "
+                "characters with booru presence. Type the danbooru "
+                "character tag manually below."), "", ""
+    best, score = chars[0][0], chars[0][1]
+    others = " · ".join("{} {:.0%}".format(c, s) for c, s in chars[1:4])
+    msg = "🎯 **{}** ({:.0%} confident){}".format(
+        best, score, " — runners-up: " + others if others else "")
+    return msg, best, _tag_to_trigger(best)
+
+
+def _auto_job_worker(char_tag, trigger, rating, count, register_style,
+                     register_passport):
+    q = _AUTO_JOB["q"]
+
+    def log(s):
+        q.put(str(s))
+
+    try:
+        log("🧬 Auto-LoRA for '{}' — collecting dataset…".format(char_tag))
+        dest = search_booru(char_tag, rating, int(count), log,
+                            trigger=trigger)
+        imgs = sorted(str(p) for p in Path(dest).glob("*")
+                      if p.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                              ".webp"))
+        if len(imgs) < 12:
+            log("✗ only {} usable images — too few for a clean LoRA. "
+                "Try rating='all' or a more precise tag.".format(len(imgs)))
+            return
+        bases = _list_base_models()
+        base = next((b for b in bases if "wai" in b.lower()),
+                    bases[0] if bases else None)
+        if not base:
+            log("✗ no base checkpoint found.")
+            return
+        proj = _slugify(char_tag)[:40]
+        log("🏋️ training '{}' on {} (Character preset, WD14 captions). "
+            "This takes a while — keep generating in other tabs.".format(
+                proj, base))
+        out = run_training_job(
+            proj, trigger, base, "Character",
+            CAPTION_MODES[0], imgs,
+            network_dim=16, network_alpha=8, learning_rate=1e-4,
+            num_epochs=15, repeats=10, resolution=768, batch_size=1,
+            log=log)
+        lora_name = Path(out).stem
+        block = "<lora:{}:0.9>, {}, {}".format(lora_name, trigger, char_tag)
+        if register_style:
+            try:
+                import csv as _csv
+                with open(_forge_root() / "styles.csv", "a",
+                          encoding="utf-8", newline="") as f:
+                    _csv.writer(f).writerow(
+                        ["{} (auto-LoRA)".format(char_tag), block, ""])
+                log("🪪 registered in styles.csv (drag chip in the Style "
+                    "Explorer after a board refresh)")
+            except Exception as exc:
+                log("⚠ styles.csv registration failed: {}".format(exc))
+        if register_passport:
+            pp = _ext_module_with("save_passport")
+            if pp is not None:
+                try:
+                    pp.save_passport({"name": char_tag, "tags": char_tag,
+                                      "lora": "<lora:{}:0.9>".format(
+                                          lora_name),
+                                      "trigger": trigger, "negative": "",
+                                      "notes": "auto-trained"})
+                    log("🪪 Passport saved.")
+                except Exception as exc:
+                    log("⚠ passport save failed: {}".format(exc))
+        log("✅ DONE — use it as <lora:{}:0.9> with trigger '{}'.".format(
+            lora_name, trigger))
+    except Exception as exc:
+        q.put("✗ {}: {}".format(type(exc).__name__, exc))
+
+
+def start_auto_lora(char_tag, trigger, rating, count, register_style,
+                    register_passport):
+    import time as _time
+    from queue import Queue as _Q, Empty as _E
+    char_tag = (char_tag or "").strip()
+    if not char_tag:
+        yield "Type or identify a character tag first."
+        return
+    if _AUTO_JOB["thread"] is not None and _AUTO_JOB["thread"].is_alive():
+        yield "A job is already running — watch its log."
+        return
+    _AUTO_JOB["q"] = _Q()
+    _AUTO_JOB["log"] = []
+    _AUTO_JOB["thread"] = threading.Thread(
+        target=_auto_job_worker,
+        args=(char_tag, (trigger or "").strip() or _slugify(char_tag),
+              rating, count, register_style, register_passport),
+        daemon=True)
+    _AUTO_JOB["thread"].start()
+    while _AUTO_JOB["thread"].is_alive() or not _AUTO_JOB["q"].empty():
+        try:
+            while True:
+                _AUTO_JOB["log"].append(_AUTO_JOB["q"].get_nowait())
+        except _E:
+            pass
+        yield "\n".join(_AUTO_JOB["log"][-18:])
+        _time.sleep(1.5)
+    yield "\n".join(_AUTO_JOB["log"][-18:])
+
+
 def _build_tab():
     """Build the tab. Wrapped so any error during construction is loud."""
     with gr.Blocks(analytics_enabled=False) as ui:
@@ -1224,6 +1370,52 @@ def _build_tab():
         - Training a small character LoRA on SDXL typically takes 20-60 min on a 3070/3080 GPU.
         - The output LoRA is copied to `models/Lora/` automatically.
         """).strip())
+
+        with gr.Accordion("🧬 Auto-LoRA — from one picture to a trained "
+                          "character", open=True):
+            gr.Markdown(
+                "Upload a picture → **Identify** reads it with WD14 → "
+                "**Train** collects a booru dataset, captions it, trains, "
+                "and registers the result in styles.csv and as a Passport. "
+                "The manual controls below stay available for full "
+                "control.")
+            with gr.Row():
+                auto_photo = gr.Image(type="pil",
+                                      label="Character picture")
+                with gr.Column():
+                    auto_ident_btn = gr.Button("🔎 Identify character",
+                                               variant="primary")
+                    auto_ident_md = gr.Markdown("")
+                    auto_char_tb = gr.Textbox(
+                        label="Danbooru character tag",
+                        placeholder="e.g. raiden mei")
+                    auto_trig_tb = gr.Textbox(
+                        label="Trigger word (first tag in every caption)")
+                    with gr.Row():
+                        auto_rating_dd = gr.Dropdown(
+                            ["safe", "sensitive", "questionable",
+                             "explicit", "all"],
+                            value="all", label="Dataset rating")
+                        auto_count_sl = gr.Slider(
+                            20, 120, value=48, step=4,
+                            label="Dataset size")
+                    with gr.Row():
+                        auto_reg_style = gr.Checkbox(
+                            True, label="Register in styles.csv")
+                        auto_reg_pass = gr.Checkbox(
+                            True, label="Save a Passport")
+                    auto_train_btn = gr.Button(
+                        "🏋️ Build dataset & train", variant="primary")
+            auto_log = gr.Textbox(label="Auto-LoRA job log", lines=10,
+                                  interactive=False)
+            auto_ident_btn.click(auto_identify, [auto_photo],
+                                 [auto_ident_md, auto_char_tb,
+                                  auto_trig_tb])
+            auto_train_btn.click(start_auto_lora,
+                                 [auto_char_tb, auto_trig_tb,
+                                  auto_rating_dd, auto_count_sl,
+                                  auto_reg_style, auto_reg_pass],
+                                 [auto_log])
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -1638,7 +1830,7 @@ def _build_tab():
                 return "", None, "File not found - try Refresh."
             try:
                 caption = txt_path.read_text(encoding="utf-8")
-            except Exception as e:
+            except Exception:
                 caption = ""
             return caption, str(img_path), "Loaded {}".format(image_name)
 
