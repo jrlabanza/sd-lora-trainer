@@ -2,6 +2,16 @@
 
 Adds a **LoRA Trainer** tab to Stable Diffusion WebUI Forge - Neo.
 
+## What's new - November 2026: Auto-LoRA
+
+A **🧬 Auto-LoRA** panel at the top of the tab goes from one picture to a trained character LoRA:
+
+1. Drop a **character picture** and press **🔎 Identify character**: the WD14 tagger reads it and fills in the Danbooru character tag (you can type or correct it, e.g. `raiden mei`).
+2. Set a **trigger word** (it becomes the first tag of every caption), the **dataset rating** (safe / sensitive / questionable / explicit / all) and the **dataset size** (20-120 images, 48 by default).
+3. Press **Train**: it collects a booru dataset for that character, captions it with WD14, trains with the Character preset on your base checkpoint, and - when ticked - registers the result in `styles.csv` and saves a **Passport** for it. Progress streams into the *Auto-LoRA job log*.
+
+It stops with a message when too few usable images are found for a clean LoRA or no base checkpoint is installed. The manual controls below stay available for full control.
+
 ## What it does
 
 Drop 5–15 reference images, type a trigger word, pick a preset (Character / Style / Concept) and a base SDXL checkpoint, then click **Start training**. The extension automatically:
