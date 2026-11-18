@@ -2,7 +2,18 @@
 
 Adds a **LoRA Trainer** tab to Stable Diffusion WebUI Forge - Neo.
 
-## What's new - November 2026: Auto-LoRA
+## What's new - November 2026: setup for every card, done by Forge's installer
+
+- **RTX 50 cards train.** The training environment gets PyTorch 2.8.0 + CUDA 12.8 on an RTX 50 (Blackwell, as
+  sd-scripts' README asks) - the 2.6.0 + CUDA 12.4 it always installed has no kernels for those cards. Other NVIDIA
+  cards keep 2.6.0 + CUDA 12.4, the version sd-scripts is tested with.
+- **Set up by Forge's installer.** `tools\initialize.bat` (and the AI Studio Hub installer) builds the training
+  environment with a private Python 3.11 - no double-click needed (`-NoTrainer` skips it; `setup_venv.bat` still does
+  it by hand). Re-running is quick: a working environment is only checked.
+- **Pinned and checked.** kohya-ss/sd-scripts is cloned at the commit this extension was tested with (`068bcd7`), and
+  setup ends with a calculation on the GPU and the training stack's imports - exit code 0 means ready.
+
+## Auto-LoRA
 
 A **🧬 Auto-LoRA** panel at the top of the tab goes from one picture to a trained character LoRA:
 
@@ -16,7 +27,7 @@ It stops with a message when too few usable images are found for a clean LoRA or
 
 Drop 5–15 reference images, type a trigger word, pick a preset (Character / Style / Concept) and a base SDXL checkpoint, then click **Start training**. The extension automatically:
 
-1. Installs `kohya-ss/sd-scripts` into a sandboxed venv at `extensions/sd-forge-lora-trainer/sd-scripts-venv/` on first use (so Forge's bleeding-edge PyTorch doesn't get downgraded).
+1. Runs `kohya-ss/sd-scripts` from its own sandboxed venv at `extensions/sd-forge-lora-trainer/sd-scripts-venv/` (so Forge's bleeding-edge PyTorch doesn't get downgraded) - set up once, see below.
 2. Resizes / pads your images to SDXL bucket sizes.
 3. Auto-captions with WD14 tagger (anime) or BLIP (photo), then prepends your trigger word to every caption.
 4. Writes the kohya folder layout (`N_concept/...`) and a training TOML.
@@ -36,13 +47,21 @@ Override any of these in the **Advanced** accordion.
 
 ## First-time install
 
-The first `Start training` click downloads ~5–7 GB of dependencies (PyTorch CUDA 12.1 + accelerate + transformers + diffusers + bitsandbytes + onnxruntime-gpu) into the sandboxed venv. Expect 5–15 minutes on a fast connection. After that, subsequent training jobs start in seconds.
+Forge's installer (`tools\initialize.bat`, step *LoRA Trainer environment*) does it on an NVIDIA card; by hand,
+double-click `setup_venv.bat` (Python 3.10 or 3.11 via the `py` launcher). `setup_bootstrap.py` clones sd-scripts at
+`068bcd7`, creates `sd-scripts-venv/` and installs PyTorch for the card (2.8.0 + CUDA 12.8 on an RTX 50, NVIDIA driver
+570+; else 2.6.0 + CUDA 12.4), kohya's `requirements.txt` and onnxruntime-gpu - about 8 GB, 5–15 minutes - then checks
+it with a calculation on the GPU. Run again, it only checks (and repairs what is missing).
 
-If your driver doesn't support CUDA 12.x wheels (rare), set this in `webui-user.bat` before launching once:
+To force another PyTorch, set before running it:
 
 ```bat
 set LORA_TRAINER_TORCH_INDEX=https://download.pytorch.org/whl/cu118
+set LORA_TRAINER_TORCH=torch==2.6.0 torchvision==0.21.0
 ```
+
+Linux: the tab is installed by `linux/initialize.sh`, but its training environment is not set up there yet (the
+container has only Forge's Python 3.13).
 
 ## Troubleshooting
 
